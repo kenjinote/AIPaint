@@ -1,6 +1,52 @@
-#include "DrawingObject.h"
+ï»¿#include "DrawingObject.h"
 
-// --- CFreehandStroke À‘• ---
+// === ãƒ˜ãƒ«ãƒ‘ãƒ¼é–¢æ•°: æ¥•å††ãƒ•ã‚£ãƒƒãƒ†ã‚£ãƒ³ã‚° (ç°¡ç•¥ç‰ˆ) ===
+bool FitEllipse(const std::vector<D2D1_POINT_2F>& points, float tolerance, D2D1_ELLIPSE& outEllipse) {
+    if (points.size() < 5) return false;
+
+    // 1. ãƒã‚¦ãƒ³ãƒ‡ã‚£ãƒ³ã‚°ãƒœãƒƒã‚¯ã‚¹ã®è¨ˆç®—
+    float minX = points[0].x, minY = points[0].y;
+    float maxX = points[0].x, maxY = points[0].y;
+    for (const auto& p : points) {
+        minX = min(minX, p.x);
+        maxX = max(maxX, p.x);
+        minY = min(minY, p.y);
+        maxY = max(maxY, p.y);
+    }
+
+    // 2. æ¥•å††ã®ãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿ã‚’è¨­å®š (ãƒã‚¦ãƒ³ãƒ‡ã‚£ãƒ³ã‚°ãƒœãƒƒã‚¯ã‚¹ã®ä¸­å¿ƒã¨åŠå¾„ã‹ã‚‰æ¦‚ç®—)
+    float centerX = (minX + maxX) / 2.0f;
+    float centerY = (minY + maxY) / 2.0f;
+    float radiusX = (maxX - minX) / 2.0f;
+    float radiusY = (maxY - minY) / 2.0f;
+
+    // æ¥•å††ãŒå°ã•ã™ãã‚‹å ´åˆã¯ç„¡è¦–
+    if (radiusX < 10.0f || radiusY < 10.0f) return false;
+
+    outEllipse.point = D2D1::Point2F(centerX, centerY);
+    outEllipse.radiusX = radiusX;
+    outEllipse.radiusY = radiusY;
+
+    // 3. é©åˆåº¦ã®åˆ¤å®š
+    float maxDeviationSq = 0.0f;
+
+    for (const auto& p : points) {
+        // æ­£è¦åŒ–ã•ã‚ŒãŸåº§æ¨™
+        float nx = (p.x - centerX) / radiusX;
+        float ny = (p.y - centerY) / radiusY;
+
+        // æ¥•å††ã®å¼: (x/a)^2 + (y/b)^2 = 1ã€‚åå·®ãŒ0ã«è¿‘ã„ã»ã©é©åˆ
+        float deviation = std::abs(nx * nx + ny * ny - 1.0f);
+        maxDeviationSq = max(maxDeviationSq, deviation);
+    }
+
+    // é–¾å€¤ 0.2 ã¯èª¿æ•´å¯èƒ½ã€‚ã‚¹ãƒˆãƒ­ãƒ¼ã‚¯ãŒé–‰ã˜ã¦ã„ãªãã¦ã‚‚åˆ¤å®šãŒé€šã‚‹å¯èƒ½æ€§ã‚ã‚Šã€‚
+    return maxDeviationSq < 0.2f;
+}
+// ===================================
+
+
+// --- CFreehandStroke å®Ÿè£… ---
 
 CFreehandStroke::CFreehandStroke(D2D1_COLOR_F color, float width)
     : m_color(color), m_strokeWidth(width), m_isComplemented(false) {
@@ -27,49 +73,68 @@ std::shared_ptr<IDrawableObject> CFreehandStroke::Clone() const {
     auto clone = std::make_shared<CFreehandStroke>(m_color, m_strokeWidth);
     clone->m_points = m_points;
     clone->m_isComplemented = m_isComplemented;
+    clone->m_detectedShape = m_detectedShape;
+    clone->m_complementEllipse = m_complementEllipse;
     return clone;
 }
 
-bool CFreehandStroke::IsComplementable() const {
-    // •âŠ®Ï‚İ‚Å‚È‚¢A‚©‚Â“_”‚ª\•ª‚É‚ ‚é‚±‚Æ‚ğŠm”F
-    return !m_isComplemented && m_points.size() >= 2;
-}
-
-// ŠÈˆÕAI•âŠ®ƒƒWƒbƒN: ‚Ù‚Ú’¼ü‚È‚ç’¼ü‚É•âŠ®‰Â”\‚Æƒtƒ‰ƒO‚ğ—§‚Ä‚é
 void CFreehandStroke::Complement() {
     if (m_points.size() < 2) return;
 
+    m_isComplemented = false;
+    m_detectedShape = ShapeType::None;
+
+    // --- 1. ç›´ç·šåˆ¤å®š ---
     D2D1_POINT_2F start = m_points.front();
     D2D1_POINT_2F end = m_points.back();
-
     float dx = end.x - start.x;
     float dy = end.y - start.y;
     float L_sq = dx * dx + dy * dy;
     float L = std::sqrt(L_sq);
+    const float LINE_TOLERANCE = m_strokeWidth * 2.0f;
+    float maxLineDeviation = 0.0f;
 
-    // ‹–—eŒë· (ƒXƒgƒ[ƒN•‚Ì2”{)
-    const float MAX_DEVIATION = m_strokeWidth * 2.0f;
-
-    float maxDeviation = 0.0f;
-
-    // Še“_‚Æn“_EI“_‚ğŒ‹‚Ô’¼ü‚Æ‚Ì‹——£‚ğŒvZ
     for (const auto& p : m_points) {
-        // A*x + B*y + C = 0 ‚Ì‹——£ŒvZ
         float A = end.y - start.y;
         float B = start.x - end.x;
         float C = end.x * start.y - end.y * start.x;
-
         float distance = std::abs(A * p.x + B * p.y + C) / (L > 0.0f ? L : 1.0f);
-        maxDeviation = max(maxDeviation, distance);
+        maxLineDeviation = max(maxLineDeviation, distance);
     }
 
-    // Å‘å•Î·‚ª‹–—e”ÍˆÍ“à‚Å‚ ‚ê‚ÎA•âŠ®‰Â”\‚Æƒ}[ƒN
-    if (maxDeviation < MAX_DEVIATION) {
+    // --- 2. å††/æ¥•å††åˆ¤å®š ---
+    D2D1_ELLIPSE potentialEllipse = { 0 };
+    const float ELLIPSE_FIT_TOLERANCE = 10.0f;
+    bool isEllipse = FitEllipse(m_points, ELLIPSE_FIT_TOLERANCE, potentialEllipse);
+
+    // --- 3. åˆ¤å®šçµæœã®é©ç”¨ ---
+
+    if (isEllipse && maxLineDeviation > 5.0f * LINE_TOLERANCE) {
+        // æ¥•å††ã¨ã—ã¦é©åˆã—ã€ç›´ç·šã¨ã—ã¦é©åˆã—ãªã„å ´åˆ
         m_isComplemented = true;
+        m_detectedShape = ShapeType::Ellipse;
+        m_complementEllipse = potentialEllipse;
+
+    }
+    else if (maxLineDeviation < LINE_TOLERANCE) {
+        // ç›´ç·šã¨ã—ã¦é©åˆã™ã‚‹å ´åˆ (æœ€ã‚‚å˜ç´”ãªã®ã§å„ªå…ˆ)
+        m_isComplemented = true;
+        m_detectedShape = ShapeType::Line;
+
+    }
+    else if (m_points.size() > 10) {
+        // ãã®ä»–ã€è¤‡é›‘ãªæ›²ç·šã¨ã—ã¦èªè­˜ (ã“ã“ã§ã¯Cubic BÃ©zierã«è£œå®Œå¯èƒ½ã¨è¦‹ãªã™)
+        m_isComplemented = true;
+        m_detectedShape = ShapeType::Curve;
     }
 }
 
-// --- CLineSegment À‘• ---
+bool CFreehandStroke::IsComplementable() const {
+    // è£œå®Œå¯èƒ½ã¨åˆ¤å®šã•ã‚Œã€ã‹ã¤ã¾ã è£œå®Œã•ã‚Œã¦ã„ãªã„çŠ¶æ…‹
+    return m_isComplemented && m_detectedShape != ShapeType::None;
+}
+
+// --- CLineSegment å®Ÿè£… ---
 
 CLineSegment::CLineSegment(D2D1_POINT_2F start, D2D1_POINT_2F end, D2D1_COLOR_F color, float width)
     : m_start(start), m_end(end), m_color(color), m_strokeWidth(width) {
@@ -88,39 +153,55 @@ std::shared_ptr<IDrawableObject> CLineSegment::Clone() const {
     return std::make_shared<CLineSegment>(m_start, m_end, m_color, m_strokeWidth);
 }
 
-// --- CAddObjectCommand À‘• ---
+// --- CEllipseSegment å®Ÿè£… ---
+
+CEllipseSegment::CEllipseSegment(D2D1_ELLIPSE ellipse, D2D1_COLOR_F color, float width)
+    : m_ellipse(ellipse), m_color(color), m_strokeWidth(width) {
+}
+
+void CEllipseSegment::Draw(ID2D1RenderTarget* pRT) const {
+    ID2D1SolidColorBrush* pBrush = nullptr;
+    pRT->CreateSolidColorBrush(m_color, &pBrush);
+
+    pRT->DrawEllipse(m_ellipse, pBrush, m_strokeWidth);
+
+    if (pBrush) pBrush->Release();
+}
+
+std::shared_ptr<IDrawableObject> CEllipseSegment::Clone() const {
+    return std::make_shared<CEllipseSegment>(m_ellipse, m_color, m_strokeWidth);
+}
+
+
+// --- CAddObjectCommand å®Ÿè£… ---
 
 CAddObjectCommand::CAddObjectCommand(CDocument* pDoc, std::shared_ptr<IDrawableObject> object)
     : m_pDoc(pDoc), m_object(object), m_index(0) {
 }
 
 void CAddObjectCommand::Execute() {
-    // ÅŒã‚É‘}“ü‚³‚ê‚½ƒCƒ“ƒfƒbƒNƒX‚ğ•Û‘¶
     m_index = m_pDoc->GetLastObjectIndex();
 }
 
 void CAddObjectCommand::Undo() {
-    // •Û‘¶‚µ‚½ƒCƒ“ƒfƒbƒNƒX‚ÌƒIƒuƒWƒFƒNƒg‚ğíœ
     m_pDoc->RemoveObjectAt(m_index);
 }
 
-// --- CComplementCommand À‘• ---
+// --- CComplementCommand å®Ÿè£… ---
 
 CComplementCommand::CComplementCommand(CDocument* pDoc, size_t index, std::shared_ptr<IDrawableObject> original, std::shared_ptr<IDrawableObject> newItem)
     : m_pDoc(pDoc), m_index(index), m_originalObject(original), m_newObject(newItem) {
 }
 
 void CComplementCommand::Execute() {
-    // •âŠ®Œã‚ÌƒIƒuƒWƒFƒNƒg‚É’u‚«Š·‚¦‚é
     m_pDoc->ReplaceObject(m_index, m_newObject);
 }
 
 void CComplementCommand::Undo() {
-    // Œ³‚ÌƒIƒuƒWƒFƒNƒg‚É–ß‚·
     m_pDoc->ReplaceObject(m_index, m_originalObject);
 }
 
-// --- CDocument À‘• ---
+// --- CDocument å®Ÿè£… ---
 
 void CDocument::AddObject(std::shared_ptr<IDrawableObject> object, bool recordCommand) {
     m_objects.push_back(object);
@@ -137,7 +218,6 @@ void CDocument::ReplaceObject(size_t index, std::shared_ptr<IDrawableObject> new
 }
 
 void CDocument::RemoveObjectAt(size_t index) {
-    // ƒCƒ“ƒfƒbƒNƒXˆÊ’u‚Ì—v‘f‚ğíœ
     if (index < m_objects.size()) {
         m_objects.erase(m_objects.begin() + index);
     }
@@ -154,7 +234,6 @@ std::shared_ptr<IDrawableObject> CDocument::GetLastObject() const {
 }
 
 size_t CDocument::GetLastObjectIndex() const {
-    // ƒŠƒXƒg‚ª‹ó‚Å‚È‚¯‚ê‚ÎAÅŒã‚Ì—v‘f‚ÌƒCƒ“ƒfƒbƒNƒX‚ğ•Ô‚µ‚Ü‚·B
     return m_objects.empty() ? 0 : m_objects.size() - 1;
 }
 

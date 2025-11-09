@@ -30,6 +30,7 @@ HRESULT CreateD2DResources(HWND hWnd) {
 
         D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
 
+        // レンダリングターゲットの作成
         hr = g_pD2DFactory->CreateHwndRenderTarget(
             D2D1::RenderTargetProperties(),
             D2D1::HwndRenderTargetProperties(hWnd, size),
@@ -51,7 +52,6 @@ void DiscardD2DResources() {
 void DiscardPreview() {
     g_pComplementPreview = nullptr;
     g_pOriginalObject = nullptr;
-    // g_previewIndex はこの時点でリセット不要
 }
 
 // 描画処理
@@ -74,28 +74,25 @@ void OnPaint(HWND hWnd) {
 
         // AI補完プレビューの描画 (半透明)
         if (g_pComplementPreview) {
-            // レイヤーを使用して不透明度を設定
             ID2D1Layer* pLayer = nullptr;
             g_pRenderTarget->CreateLayer(NULL, &pLayer);
 
-            // ★ 修正点: LayerParameters1 ではなく D2D1_LAYER_PARAMETERS を使用
+            // Direct2D 1.0 の D2D1_LAYER_PARAMETERS を使用 (前回のビルドエラー対策)
             D2D1_LAYER_PARAMETERS layerParams = D2D1::LayerParameters(
-                D2D1::RectF(0, 0, g_pRenderTarget->GetSize().width, g_pRenderTarget->GetSize().height), // contentBounds
-                NULL, // geometry
-                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, // antiAliasMode
-                D2D1::Matrix3x2F::Identity(), // transform
-                0.5f, // alpha ★ 不透明度 50%
-                NULL, // opacityBrush
-                D2D1_LAYER_OPTIONS_NONE // layerOptions ★ 修正点: D2D1_LAYER_OPTIONS1_NONE ではなく D2D1_LAYER_OPTIONS_NONE
+                D2D1::RectF(0, 0, g_pRenderTarget->GetSize().width, g_pRenderTarget->GetSize().height),
+                NULL,
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                D2D1::Matrix3x2F::Identity(),
+                0.5f, // 不透明度 50%
+                NULL,
+                D2D1_LAYER_OPTIONS_NONE
             );
 
-            // ID2D1RenderTarget::PushLayer(const D2D1_LAYER_PARAMETERS &layerParameters, ID2D1Layer *layer) を使用
             g_pRenderTarget->PushLayer(layerParams, pLayer);
 
             // プレビューを描画
             g_pComplementPreview->Draw(g_pRenderTarget);
 
-            // レイヤーを終了
             g_pRenderTarget->PopLayer();
             if (pLayer) pLayer->Release();
         }
@@ -160,14 +157,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             // 1. オブジェクトをドキュメントのリストに追加 (コマンド記録なし)
             g_document.AddObject(g_currentStroke, false);
 
-            // 2. Addコマンドを作成し、Execute()でインデックスを保存
+            // 2. Addコマンドを作成し、Execute()でインデックスを保存し、スタックに記録
             auto addCommand = std::make_unique<CAddObjectCommand>(&g_document, g_currentStroke);
             addCommand->Execute();
-
-            // 3. コマンドをUndoスタックに記録
             g_document.RecordCommand(std::move(addCommand));
 
-            // 4. 補完プレビューを試みる
+            // 3. 補完プレビューを試みる
             std::shared_ptr<IDrawableObject> lastObj = g_document.GetLastObject();
             size_t index = g_document.GetLastObjectIndex();
 
@@ -175,21 +170,40 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 std::shared_ptr<CFreehandStroke> stroke =
                     std::dynamic_pointer_cast<CFreehandStroke>(lastObj);
 
-                if (stroke && stroke->IsComplementable()) {
+                if (stroke) {
                     stroke->Complement(); // 補完可能かの判定を実行
 
-                    if (stroke->IsComplementable() == false) { // 補完ロジックが直線と判定した場合
-                        D2D1_POINT_2F start = stroke->GetPoints().front();
-                        D2D1_POINT_2F end = stroke->GetPoints().back();
+                    if (stroke->IsComplementable()) {
 
-                        // プレビューオブジェクトを生成し、グローバル変数に保持
-                        g_pComplementPreview = std::make_shared<CLineSegment>(
-                            start, end, D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), 3.0f
-                        );
-                        g_pOriginalObject = lastObj;
-                        g_previewIndex = index;
+                        D2D1_COLOR_F previewColor = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
+                        float previewWidth = 3.0f;
 
-                        InvalidateRect(hWnd, NULL, FALSE); // プレビュー表示のために再描画
+                        // 検出された形状に応じてプレビューオブジェクトを生成
+                        switch (stroke->m_detectedShape) {
+                        case CFreehandStroke::ShapeType::Line: {
+                            D2D1_POINT_2F start = stroke->GetPoints().front();
+                            D2D1_POINT_2F end = stroke->GetPoints().back();
+                            g_pComplementPreview = std::make_shared<CLineSegment>(
+                                start, end, previewColor, previewWidth
+                            );
+                            break;
+                        }
+                        case CFreehandStroke::ShapeType::Ellipse:
+                        case CFreehandStroke::ShapeType::Curve: { // 曲線と楕円は、ここではCEllipseSegmentでプレビュー
+                            g_pComplementPreview = std::make_shared<CEllipseSegment>(
+                                stroke->m_complementEllipse, previewColor, previewWidth
+                            );
+                            break;
+                        }
+                        default:
+                            break;
+                        }
+
+                        if (g_pComplementPreview) {
+                            g_pOriginalObject = lastObj;
+                            g_previewIndex = index;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
                     }
                 }
             }
@@ -217,7 +231,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         // Tab (AI補完確定)
         else if (wParam == VK_TAB) {
             if (g_pComplementPreview) {
-                // 補完コマンドを作成
+                // 補完コマンドを作成・実行・記録
                 auto complementCommand = std::make_unique<CComplementCommand>(
                     &g_document,
                     g_previewIndex,
@@ -225,13 +239,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     g_pComplementPreview
                 );
 
-                // コマンドを実行（リスト内のオブジェクトを置き換え）
                 complementCommand->Execute();
-
-                // コマンドをUndoスタックに記録
                 g_document.RecordCommand(std::move(complementCommand));
 
-                // プレビューを破棄し、実線として確定
                 DiscardPreview();
                 InvalidateRect(hWnd, NULL, FALSE);
             }

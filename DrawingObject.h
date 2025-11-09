@@ -4,8 +4,8 @@
 #include <vector>
 #include <memory>
 #include <stack>
-#include <algorithm> // ★ 修正点: std::max を定義するために追加
-#include <cmath>     // ★ 修正点: std::abs, std::sqrt を定義するために追加
+#include <algorithm> // std::max, std::min を使用するために必要
+#include <cmath>     // std::abs, std::sqrt を使用するために必要
 
 // 前方宣言
 class CDocument;
@@ -18,28 +18,6 @@ public:
     virtual std::shared_ptr<IDrawableObject> Clone() const = 0;
     virtual void Complement() = 0; // AI補完ロジックを適用
     virtual bool IsComplementable() const = 0; // 補完可能か判定
-};
-
-// --- フリーハンドストローク ---
-class CFreehandStroke : public IDrawableObject {
-private:
-    std::vector<D2D1_POINT_2F> m_points;
-    D2D1_COLOR_F m_color;
-    float m_strokeWidth;
-    bool m_isComplemented; // 補完済みフラグ
-
-public:
-    CFreehandStroke(D2D1_COLOR_F color, float width);
-    void AddPoint(D2D1_POINT_2F p);
-
-    // IDrawableObjectをオーバーライド
-    void Draw(ID2D1RenderTarget* pRT) const override;
-    std::shared_ptr<IDrawableObject> Clone() const override;
-    void Complement() override;
-    bool IsComplementable() const override;
-
-    // データアクセス用
-    const std::vector<D2D1_POINT_2F>& GetPoints() const { return m_points; }
 };
 
 // --- 直線セグメント（補完結果として使用） ---
@@ -59,6 +37,52 @@ public:
     void Complement() override {}
     bool IsComplementable() const override { return false; }
 };
+
+// --- 楕円セグメント（補完結果として使用） ---
+class CEllipseSegment : public IDrawableObject {
+private:
+    D2D1_ELLIPSE m_ellipse;
+    D2D1_COLOR_F m_color;
+    float m_strokeWidth;
+
+public:
+    CEllipseSegment(D2D1_ELLIPSE ellipse, D2D1_COLOR_F color, float width);
+
+    // IDrawableObjectをオーバーライド
+    void Draw(ID2D1RenderTarget* pRT) const override;
+    std::shared_ptr<IDrawableObject> Clone() const override;
+    void Complement() override {}
+    bool IsComplementable() const override { return false; }
+};
+
+
+// --- フリーハンドストローク ---
+class CFreehandStroke : public IDrawableObject {
+public:
+    enum class ShapeType { None, Line, Ellipse, Curve };
+private:
+    std::vector<D2D1_POINT_2F> m_points;
+    D2D1_COLOR_F m_color;
+    float m_strokeWidth;
+    bool m_isComplemented;
+
+public:
+    ShapeType m_detectedShape = ShapeType::None;
+    D2D1_ELLIPSE m_complementEllipse = { 0 }; // 検出された楕円データ
+
+public:
+    CFreehandStroke(D2D1_COLOR_F color, float width);
+    void AddPoint(D2D1_POINT_2F p);
+
+    // IDrawableObjectをオーバーライド
+    void Draw(ID2D1RenderTarget* pRT) const override;
+    std::shared_ptr<IDrawableObject> Clone() const override;
+    void Complement() override;
+    bool IsComplementable() const override;
+
+    const std::vector<D2D1_POINT_2F>& GetPoints() const { return m_points; }
+};
+
 
 // --- コマンド抽象基底クラス（Undo/Redo用） ---
 class ICommand {
